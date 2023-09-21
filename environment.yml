@@ -1,4 +1,4 @@
-name: stp3
+name: abi-stp3
 channels:
   - defaults
   - conda-forge

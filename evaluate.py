@@ -138,8 +138,6 @@ def eval(checkpoint_path, dataroot):
 
         if index % 100 == 0:
             save(output, labels, batch, n_present, index, save_path)
-
-
     results = {}
 
     scores = metric_vehicle_val.compute()
@@ -168,23 +166,41 @@ def eval(checkpoint_path, dataroot):
     for key, value in results.items():
         print(f'{key} : {value.item()}')
 
+def make_cost_fig(cost_maps):
+    cost_imgs = torch.ones_like(cost_maps)
+    # T = len(cost_maps)
+    # for t in range(T):
+    cost_map = cost_maps #[t]
+    cost_min, cost_max = cost_map.min(), cost_map.max()
+    cost_img = (cost_map - cost_min) / (cost_max - cost_min)
+    cost_imgs = cost_img
+
+    return cost_map
+
 def save(output, labels, batch, n_present, frame, save_path):
+
+    save_frame_path = save_path / str(frame)
+    save_frame_path.mkdir(parents=True, exist_ok=False)
+
     hdmap = output['hdmap'].detach()
     segmentation = output['segmentation'][:, n_present - 1].detach()
     pedestrian = output['pedestrian'][:, n_present - 1].detach()
     gt_trajs = labels['gt_trajectory']
     images = batch['image']
+    costvolume = output['costvolume'][:, n_present - 1].detach()
 
     denormalise_img = torchvision.transforms.Compose(
         (NormalizeInverse(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
          torchvision.transforms.ToPILImage(),)
     )
 
+    cost_img = make_cost_fig(costvolume[0, :].cpu())
+
     val_w = 2.99
     val_h = 2.99 * (224. / 480.)
-    plt.figure(1, figsize=(4*val_w,2*val_h))
-    width_ratios = (val_w,val_w,val_w,val_w)
-    gs = matplotlib.gridspec.GridSpec(2, 4, width_ratios=width_ratios)
+    plt.figure(1, figsize=(5*val_w,2*val_h))
+    width_ratios = (val_w,val_w,val_w,val_w, val_w)
+    gs = matplotlib.gridspec.GridSpec(2, 5, width_ratios=width_ratios)
     gs.update(wspace=0.0, hspace=0.0, left=0.0, right=1.0, top=1.0, bottom=0.0)
 
     plt.subplot(gs[0, 0])
@@ -222,6 +238,25 @@ def save(output, labels, batch, n_present, frame, save_path):
     showing = showing.transpose(Image.FLIP_LEFT_RIGHT)
     plt.imshow(showing)
     plt.axis('off')
+    
+    bx = np.array([-50.0 + 0.5/2.0, -50.0 + 0.5/2.0])
+    dx = np.array([0.5, 0.5])
+    w, h = 1.85, 4.084
+    pts = np.array([
+        [-h / 2. + 0.5, w / 2.],
+        [h / 2. + 0.5, w / 2.],
+        [h / 2. + 0.5, -w / 2.],
+        [-h / 2. + 0.5, -w / 2.],
+    ])
+    pts = (pts - bx) / dx
+    pts[:, [0, 1]] = pts[:, [1, 0]]
+
+    plt.subplot(gs[:, 4])
+    showing = torch.flip(cost_img, [0, 1])
+    plt.imshow(showing, cmap='magma_r')
+    plt.fill(pts[:, 0], pts[:, 1], color='None', edgecolor='#76b900')
+
+    plt.axis('off')
 
     plt.subplot(gs[:, 3])
     showing = torch.zeros((200, 200, 3)).numpy()
@@ -249,17 +284,6 @@ def save(output, labels, batch, n_present, frame, save_path):
     plt.imshow(make_contour(showing))
     plt.axis('off')
 
-    bx = np.array([-50.0 + 0.5/2.0, -50.0 + 0.5/2.0])
-    dx = np.array([0.5, 0.5])
-    w, h = 1.85, 4.084
-    pts = np.array([
-        [-h / 2. + 0.5, w / 2.],
-        [h / 2. + 0.5, w / 2.],
-        [h / 2. + 0.5, -w / 2.],
-        [-h / 2. + 0.5, -w / 2.],
-    ])
-    pts = (pts - bx) / dx
-    pts[:, [0, 1]] = pts[:, [1, 0]]
     plt.fill(pts[:, 0], pts[:, 1], '#76b900')
 
     plt.xlim((200, 0))
@@ -268,8 +292,65 @@ def save(output, labels, batch, n_present, frame, save_path):
     gt_trajs = (gt_trajs[0, :, :2].cpu().numpy() - bx) / dx
     plt.plot(gt_trajs[:, 0], gt_trajs[:, 1], linewidth=3.0)
 
-    plt.savefig(save_path / ('%04d.png' % frame))
+    plt.savefig(save_frame_path / ('%04d.png' % frame))
     plt.close()
+
+    segmentations = output['segmentation'][:, n_present - 1:].detach()
+    pedestrians = output['pedestrian'][:, n_present - 1:].detach()
+    costvolumes = output['costvolume'][:, n_present - 1:].detach()
+    for ti in range(costvolumes.shape[1]):
+        seg = segmentations[:, ti]
+        ped = pedestrians[:, ti]
+        cv = costvolumes[:, ti]
+
+        cost_img = make_cost_fig(cv[0, :].cpu())
+
+        plt.figure(1, figsize=(2*val_w,2*val_h))
+        width_ratios = (val_w, val_w)
+        gs = matplotlib.gridspec.GridSpec(1, 2, width_ratios=width_ratios)
+        gs.update(wspace=0.0, hspace=0.0, left=0.0, right=1.0, top=1.0, bottom=0.0)
+
+        plt.subplot(gs[0, 0])
+        showing = torch.zeros((200, 200, 3)).numpy()
+        showing[:, :] = np.array([219 / 255, 215 / 255, 215 / 255])
+
+        # drivable
+        area = torch.argmax(hdmap[0, 2:4], dim=0).cpu().numpy()
+        hdmap_index = area > 0
+        showing[hdmap_index] = np.array([161 / 255, 158 / 255, 158 / 255])
+
+        # lane
+        area = torch.argmax(hdmap[0, 0:2], dim=0).cpu().numpy()
+        hdmap_index = area > 0
+        showing[hdmap_index] = np.array([84 / 255, 70 / 255, 70 / 255])
+
+        # semantic
+        semantic_seg = torch.argmax(seg[0], dim=0).cpu().numpy()
+        semantic_index = semantic_seg > 0
+        showing[semantic_index] = np.array([255 / 255, 128 / 255, 0 / 255])
+
+        pedestrian_seg = torch.argmax(ped[0], dim=0).cpu().numpy()
+        pedestrian_index = pedestrian_seg > 0
+        showing[pedestrian_index] = np.array([28 / 255, 81 / 255, 227 / 255])
+
+        plt.imshow(make_contour(showing))
+        plt.axis('off')
+
+        plt.fill(pts[:, 0], pts[:, 1], '#76b900')
+
+        plt.xlim((200, 0))
+        plt.ylim((0, 200))
+
+        plt.subplot(gs[0, 1])
+
+        showing = torch.flip(cost_img, [0, 1])
+        plt.imshow(showing, cmap='magma_r')
+        plt.fill(pts[:, 0], pts[:, 1], color='None', edgecolor='#76b900')
+        plt.plot(gt_trajs[:, 0], gt_trajs[:, 1], 'kx-', linewidth=1.5)
+        plt.plot(gt_trajs[ti, 0], gt_trajs[ti, 1], 'bx')
+        plt.axis('off')
+        plt.savefig(save_frame_path / (f'{frame}_{ti}.png'))
+        plt.close()
 
 if __name__ == '__main__':
     parser = ArgumentParser(description='STP3 evaluation')
